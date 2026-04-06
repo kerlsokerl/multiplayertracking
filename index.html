@@ -1,0 +1,309 @@
+<html><head><base href="." />
+  <title>3D Full Body Part Tracking With Virtual Avatar - Multiplayer</title>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #222;
+      color: white;
+      font-family: Arial, sans-serif;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+    #avatar_canvas {
+      transform: scaleX(-1);
+      width: 100%;
+      max-width: 960px;
+      height: 540px;
+      border-radius: 10px;
+      border: 3px solid #4CAF50;
+      background: #111;
+    }
+    .status {
+      margin-top: 4px;
+      padding: 8px 12px;
+      background: #4CAF50;
+      border-radius: 5px;
+      display: inline-block;
+    }
+    .controls {
+      margin: 8px 0;
+      display:flex;
+      gap:12px;
+      align-items:center;
+    }
+    input[type="color"] {
+      width: 36px;
+      height: 36px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .peer-label {
+      font-size: 12px;
+      background: rgba(0,0,0,0.5);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Multiplayer Virtual Avatar (simple)</h2>
+    <div class="controls">
+      <label>Shirt: <input type="color" id="shirtColor" value="#4169E1"></label>
+      <div style="width:12px"></div>
+      <div id="peersCount" class="peer-label">Peers: 0</div>
+    </div>
+    <div class="status" id="status">Initializing...</div>
+    <canvas id="avatar_canvas"></canvas>
+  </div>
+
+  <script>
+    // Websim is available as global `WebsimSocket` in the environment where multiplayer is supported.
+    // This is a minimal, simple-as-possible multiplayer integration:
+    // - broadcast presence {head:{x,y}, neck:{x,y}, emoji, shirtColor}
+    // - render local avatar and remote peers on same canvas
+
+    const videoElement = document.createElement('video');
+    videoElement.autoplay = true;
+    videoElement.playsInline = true;
+    const avatarCanvas = document.getElementById('avatar_canvas');
+    const avatarCtx = avatarCanvas.getContext('2d');
+    const statusElement = document.getElementById('status');
+    const peersCountEl = document.getElementById('peersCount');
+    const shirtColorPicker = document.getElementById('shirtColor');
+    let currentShirtColor = shirtColorPicker.value;
+    shirtColorPicker.addEventListener('input', (e) => currentShirtColor = e.target.value);
+
+    // Simple utility drawing functions (reused)
+    function drawEmoji(x, y, type = 'smile', scale = 1) {
+      const size = 60 * scale;
+      avatarCtx.save();
+      avatarCtx.translate(x, y);
+      avatarCtx.fillStyle = '#FFD700';
+      avatarCtx.beginPath();
+      avatarCtx.arc(0, 0, size/2, 0, Math.PI * 2); avatarCtx.fill();
+      avatarCtx.strokeStyle = '#000'; avatarCtx.lineWidth = 2; avatarCtx.stroke();
+      avatarCtx.fillStyle = '#000';
+      avatarCtx.beginPath(); avatarCtx.arc(-size/5, -size/8, size/10, 0, Math.PI*2); avatarCtx.arc(size/5, -size/8, size/10, 0, Math.PI*2); avatarCtx.fill();
+      avatarCtx.strokeStyle = '#000'; avatarCtx.lineWidth = 3;
+      if (type === 'smile') { avatarCtx.beginPath(); avatarCtx.arc(0, size/8, size/4, 0, Math.PI); avatarCtx.stroke(); }
+      else if (type === 'sad') { avatarCtx.beginPath(); avatarCtx.arc(0, size/3, size/4, Math.PI, Math.PI*2); avatarCtx.stroke(); }
+      else { avatarCtx.beginPath(); avatarCtx.moveTo(-size/4, size/8); avatarCtx.lineTo(size/4, size/8); avatarCtx.stroke(); }
+      avatarCtx.restore();
+    }
+
+    function shadeColor(color, percent) {
+      let R = parseInt(color.substring(1,3),16);
+      let G = parseInt(color.substring(3,5),16);
+      let B = parseInt(color.substring(5,7),16);
+      R = Math.min(255, Math.round(R * (100 + percent) / 100));
+      G = Math.min(255, Math.round(G * (100 + percent) / 100));
+      B = Math.min(255, Math.round(B * (100 + percent) / 100));
+      const toHex = (n) => (n.toString(16).length==1?"0"+n.toString(16):n.toString(16));
+      return "#" + toHex(R) + toHex(G) + toHex(B);
+    }
+
+    function drawBodyRect(x1, y1, x2, y2, color) {
+      const depth = 20;
+      avatarCtx.save();
+      avatarCtx.fillStyle = color;
+      avatarCtx.strokeStyle = '#000';
+      avatarCtx.fillRect(x1, y1, x2-x1, y2-y1);
+      avatarCtx.strokeRect(x1, y1, x2-x1, y2-y1);
+      avatarCtx.fillStyle = shadeColor(color, -15);
+      avatarCtx.beginPath(); avatarCtx.moveTo(x2, y1); avatarCtx.lineTo(x2+depth, y1-depth); avatarCtx.lineTo(x2+depth, y2-depth); avatarCtx.lineTo(x2, y2); avatarCtx.closePath(); avatarCtx.fill(); avatarCtx.stroke();
+      avatarCtx.fillStyle = shadeColor(color, 10);
+      avatarCtx.beginPath(); avatarCtx.moveTo(x1, y1); avatarCtx.lineTo(x1+depth, y1-depth); avatarCtx.lineTo(x2+depth, y1-depth); avatarCtx.lineTo(x2, y1); avatarCtx.closePath(); avatarCtx.fill(); avatarCtx.stroke();
+      avatarCtx.restore();
+    }
+
+    // Multiplayer minimal setup
+    let room = null;
+    let peersPresence = {}; // latest presence for peers
+    async function startMultiplayer() {
+      try {
+        room = new WebsimSocket(); // global in environment
+        await room.initialize();
+        statusElement.textContent = 'Connected to room as ' + (room.peers[room.clientId]?.username || 'you');
+        peersCountEl.textContent = 'Peers: ' + (Object.keys(room.peers).length - 1);
+        // send presence regularly (throttle)
+        setInterval(() => {
+          if (!lastPose) return;
+          const head = lastPose[0] ? {x:lastPose[0].x, y:lastPose[0].y} : null;
+          const neck = (lastPose[11] && lastPose[12]) ? {x:(lastPose[11].x+lastPose[12].x)/2, y:(lastPose[11].y+lastPose[12].y)/2} : null;
+          const emoji = inferEmojiFromPose(lastPose);
+          room.updatePresence({
+            head, neck, emoji, shirtColor: currentShirtColor
+          });
+        }, 120);
+
+        // keep local copy of peers' presence and update UI when changed
+        room.subscribePresence((allPresence) => {
+          peersPresence = {...allPresence};
+          delete peersPresence[room.clientId]; // remove local from remote list
+          peersCountEl.textContent = 'Peers: ' + Object.keys(peersPresence).length;
+        });
+
+        room.onmessage = (evt) => {
+          // basic logging - not used further in this simple example
+          // console.log('Event', evt);
+        };
+
+      } catch (err) {
+        console.warn('Multiplayer init failed:', err);
+        statusElement.textContent = 'Multiplayer unavailable';
+        statusElement.style.backgroundColor = '#ff8844';
+      }
+    }
+
+    // Simple emoji inference: use distance between mouth corners via pose landmarks if available (fallback to smile)
+    function inferEmojiFromPose(landmarks) {
+      // Mediapipe Pose doesn't include detailed face landmarks here; keep simple: use y-offset of nose vs eyes if available (0 = nose)
+      try {
+        // a naive mapping: if head tilts down (y larger) -> sad; else smile
+        const head = landmarks[0];
+        if (!head) return 'neutral';
+        const noseY = head.y;
+        if (noseY > 0.55) return 'sad';
+        if (noseY < 0.35) return 'smile';
+        return 'neutral';
+      } catch (e) { return 'neutral'; }
+    }
+
+    // Rendering remote peers on top of local rendering
+    function renderPeers() {
+      if (!room) return;
+      const scaleW = avatarCanvas.width;
+      const scaleH = avatarCanvas.height;
+      Object.keys(room.presence || {}).forEach(clientId => {
+        if (clientId === room.clientId) return;
+        const p = room.presence[clientId];
+        if (!p || (!p.head && !p.neck)) return;
+        const head = p.head; const neck = p.neck;
+        const shirt = p.shirtColor || '#999';
+        const emoji = p.emoji || 'neutral';
+        if (neck && head) {
+          const nx = neck.x * scaleW, ny = neck.y * scaleH;
+          const hx = head.x * scaleW, hy = head.y * scaleH;
+          drawBodyRect(nx - 60, ny - 10, nx + 60, ny + 120, shirt);
+          // neck line
+          avatarCtx.strokeStyle = '#FFD3B6'; avatarCtx.lineWidth = 12;
+          avatarCtx.beginPath(); avatarCtx.moveTo(nx, ny); avatarCtx.lineTo(hx, hy + 20); avatarCtx.stroke();
+          drawEmoji(hx, hy, emoji, 0.9);
+          // label
+          const peerInfo = room.peers[clientId];
+          const label = peerInfo ? peerInfo.username : 'peer';
+          avatarCtx.fillStyle = 'rgba(0,0,0,0.6)';
+          avatarCtx.fillRect(nx-40, ny+125, 80, 20);
+          avatarCtx.fillStyle = '#fff'; avatarCtx.font = '12px Arial';
+          avatarCtx.textAlign = 'center';
+          avatarCtx.fillText(label, nx, ny+140);
+        }
+      });
+    }
+
+    // Keep last pose for broadcasting
+    let lastPose = null;
+
+    // Existing local drawing logic but modified to also render peers after local draw
+    function drawAvatarLocal(landmarks) {
+      if (!landmarks) return;
+      lastPose = landmarks;
+      avatarCanvas.width = 960;
+      avatarCanvas.height = 540;
+      avatarCtx.clearRect(0, 0, avatarCanvas.width, avatarCanvas.height);
+
+      // draw local body (slightly larger & tinted)
+      if (landmarks[11] && landmarks[12] && landmarks[23] && landmarks[24]) {
+        const x1 = Math.min(landmarks[11].x, landmarks[23].x) * avatarCanvas.width;
+        const x2 = Math.max(landmarks[12].x, landmarks[24].x) * avatarCanvas.width;
+        const y1 = landmarks[11].y * avatarCanvas.height;
+        const y2 = landmarks[23].y * avatarCanvas.height;
+        drawBodyRect(x1, y1, x2, y2, currentShirtColor);
+      }
+
+      if (landmarks[0]) {
+        const neckX = (landmarks[11].x + landmarks[12].x) / 2 * avatarCanvas.width;
+        const neckY = (landmarks[11].y + landmarks[12].y) / 2 * avatarCanvas.height;
+        const headX = landmarks[0].x * avatarCanvas.width;
+        const headY = landmarks[0].y * avatarCanvas.height;
+        avatarCtx.strokeStyle = '#FFD3B6';
+        avatarCtx.lineWidth = 18;
+        avatarCtx.beginPath(); avatarCtx.moveTo(neckX, neckY); avatarCtx.lineTo(headX, headY + 22); avatarCtx.stroke();
+        const emoji = inferEmojiFromPose(landmarks);
+        drawEmoji(headX, headY, emoji, 1.2);
+      }
+
+      // simple limbs
+      avatarCtx.strokeStyle = '#FFD3B6'; avatarCtx.lineWidth = 20;
+      if (landmarks[11] && landmarks[13] && landmarks[15]) {
+        avatarCtx.beginPath();
+        avatarCtx.moveTo(landmarks[11].x * avatarCanvas.width, landmarks[11].y * avatarCanvas.height);
+        avatarCtx.lineTo(landmarks[13].x * avatarCanvas.width, landmarks[13].y * avatarCanvas.height);
+        avatarCtx.lineTo(landmarks[15].x * avatarCanvas.width, landmarks[15].y * avatarCanvas.height);
+        avatarCtx.stroke();
+      }
+      if (landmarks[12] && landmarks[14] && landmarks[16]) {
+        avatarCtx.beginPath();
+        avatarCtx.moveTo(landmarks[12].x * avatarCanvas.width, landmarks[12].y * avatarCanvas.height);
+        avatarCtx.lineTo(landmarks[14].x * avatarCanvas.width, landmarks[14].y * avatarCanvas.height);
+        avatarCtx.lineTo(landmarks[16].x * avatarCanvas.width, landmarks[16].y * avatarCanvas.height);
+        avatarCtx.stroke();
+      }
+
+      // draw peers on top
+      renderPeers();
+    }
+
+    function onResults(results) {
+      if (results.poseLandmarks) {
+        drawAvatarLocal(results.poseLandmarks);
+        statusElement.textContent = "Tracking Active";
+      } else {
+        statusElement.textContent = "No Body Detected";
+      }
+    }
+
+    // Initialize mediapipe pose and camera
+    async function initializeTracking() {
+      try {
+        const pose = new Pose({
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${file}`
+        });
+        await pose.initialize();
+        pose.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        pose.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+          onFrame: async () => await pose.send({image: videoElement}),
+          width: 1280, height: 720
+        });
+        await camera.start();
+        statusElement.textContent = "Camera Active - Show your body!";
+      } catch (error) {
+        console.error('Error initializing:', error);
+        statusElement.textContent = "Error initializing tracking. Please refresh.";
+        statusElement.style.backgroundColor = "#ff4444";
+      }
+    }
+
+    // Start everything
+    (async function startAll() {
+      await initializeTracking();
+      await startMultiplayer();
+    })();
+
+  </script>
+</body></html>
