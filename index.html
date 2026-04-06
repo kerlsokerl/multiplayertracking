@@ -129,15 +129,116 @@
       avatarCtx.restore();
     }
 
-    // Multiplayer minimal setup
+    // Multiplayer minimal setup (WebSocket -> simple room shim)
     let room = null;
     let peersPresence = {}; // latest presence for peers
+
+    // Simple room-like wrapper using wss://clouddata.turbowarp.org
+    class SimpleWSRoom {
+      constructor(url) {
+        this.url = url;
+        this.ws = null;
+        this.clientId = 'c-' + Math.random().toString(36).slice(2,9);
+        this.peers = {}; // peer info (username/avatar not available)
+        this.presence = {}; // presence map
+        this._presenceCallback = null;
+        this.onmessage = null;
+      }
+      async initialize() {
+        return new Promise((resolve, reject) => {
+          try {
+            this.ws = new WebSocket(this.url);
+            this.ws.onopen = () => {
+              // announce join
+              this.ws.send(JSON.stringify({type:'join', clientId:this.clientId}));
+              // set a simple self entry
+              this.peers[this.clientId] = { username: this.clientId, avatarUrl: '' };
+              resolve();
+            };
+            this.ws.onmessage = (ev) => {
+              try {
+                const data = JSON.parse(ev.data);
+                // echo-updated presence or peer join/leave
+                switch (data.type) {
+                  case 'presence':
+                    // data.presence expected: { clientId: { head, neck, emoji, shirtColor } }
+                    Object.keys(data.presence || {}).forEach(id => {
+                      if (data.presence[id] === null) {
+                        delete this.presence[id];
+                        delete this.peers[id];
+                      } else {
+                        this.presence[id] = data.presence[id];
+                        if (!this.peers[id]) this.peers[id] = { username: id, avatarUrl: '' };
+                      }
+                    });
+                    if (this._presenceCallback) this._presenceCallback({...this.presence});
+                    break;
+                  case 'peerlist':
+                    // optional peerlist sync
+                    (data.peers || []).forEach(id => {
+                      if (!this.peers[id]) this.peers[id] = { username: id, avatarUrl: '' };
+                    });
+                    break;
+                  case 'joined':
+                    if (!this.peers[data.clientId]) this.peers[data.clientId] = { username: data.clientId, avatarUrl: '' };
+                    break;
+                  case 'left':
+                    delete this.peers[data.clientId];
+                    delete this.presence[data.clientId];
+                    if (this._presenceCallback) this._presenceCallback({...this.presence});
+                    break;
+                  default:
+                    // custom event passthrough
+                    if (this.onmessage) this.onmessage(data);
+                }
+              } catch (e) {
+                console.warn('WS parse error', e);
+              }
+            };
+            this.ws.onerror = (e) => {
+              console.warn('WebSocket error', e);
+            };
+            this.ws.onclose = () => {
+              // clear peers
+              this.peers = {};
+              this.presence = {};
+              if (this._presenceCallback) this._presenceCallback({...this.presence});
+            };
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }
+      updatePresence(presenceObj) {
+        // send presence update for this client
+        const payload = { type: 'presence_update', clientId: this.clientId, presence: presenceObj };
+        try { this.ws.send(JSON.stringify(payload)); } catch(e){/*ignore*/}
+        // locally reflect update so local render uses latest data
+        this.presence[this.clientId] = presenceObj;
+        if (this._presenceCallback) this._presenceCallback({...this.presence});
+      }
+      updateRoomState() {}
+      requestPresenceUpdate() {}
+      subscribePresence(cb) {
+        this._presenceCallback = cb;
+        // immediately call with current
+        cb({...this.presence});
+        return () => { this._presenceCallback = null; };
+      }
+      subscribeRoomState() { return () => {}; }
+      subscribePresenceUpdateRequests() { return () => {}; }
+      send(ev) {
+        try { this.ws.send(JSON.stringify(ev)); } catch (e) {}
+      }
+    }
+
     async function startMultiplayer() {
       try {
-        room = new WebsimSocket(); // global in environment
+        room = new SimpleWSRoom('wss://clouddata.turbowarp.org');
         await room.initialize();
-        statusElement.textContent = 'Connected to room as ' + (room.peers[room.clientId]?.username || 'you');
+        statusElement.textContent = 'Connected (ws) as ' + room.clientId;
         peersCountEl.textContent = 'Peers: ' + (Object.keys(room.peers).length - 1);
+
         // send presence regularly (throttle)
         setInterval(() => {
           if (!lastPose) return;
@@ -157,8 +258,8 @@
         });
 
         room.onmessage = (evt) => {
-          // basic logging - not used further in this simple example
-          // console.log('Event', evt);
+          // passthrough events from the server if needed
+          // console.log('WS event', evt);
         };
 
       } catch (err) {
